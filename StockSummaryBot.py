@@ -1,10 +1,22 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logging
+os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'  # Suppress warning when using transformers
 import yfinance as yf
 from newsapi import NewsApiClient
-import openai
 import matplotlib.pyplot as plt
+import time
+import spacy
+from chonkie import TokenChunker
+from tokenizers import Tokenizer
+from transformers import pipeline, BartTokenizer, BartForConditionalGeneration, BartConfig
+import tensorflow as tf
+import logging
 
-# Add your OpenAI API key here
-openai.api_key = 'OPENAI_API_KEY'
+tf.get_logger().setLevel('ERROR')
+logging.getLogger("transformers").setLevel(logging.ERROR)
+
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+sentiment_analyzer = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
 
 # Function to get stock data
 def get_stock_data(ticker):
@@ -19,22 +31,41 @@ def get_stock_data(ticker):
 
 # Function to get news
 def get_stock_news(query):
-    newsapi = NewsApiClient(api_key='NEWS_API_KEY')
+    newsapi = NewsApiClient(api_key=os.getenv("NEWS_API_KEY"))
     articles = newsapi.get_everything(q=query, language='en', sort_by='relevancy')
-    return articles['articles'][:5]
+    relevant_articles = [
+        article for article in articles['articles']
+        if query.lower() in article.get('title', '').lower() or query.lower() in article.get('description', '').lower()
+    ]
+    return relevant_articles[:5]  # Return top 5 relevant articles
 
-# Function to summarize news
+# Function to summarize news using T5
 def generate_summary(news_articles):
-    prompt = "Summarize the following stock news:\n"
+    start_time = time.time()
+    # Combine all articles into a single prompt
+    prompt = "You are a financial news summarizer. Focus on Apple Inc. (AAPL) and exclude irrelevant topics. Summarize the following:\n"
     for article in news_articles:
-        prompt += f"Title: {article['title']}\nContent: {article['description']}\n\n"
+        title = article.get('title', 'No Title')
+        description = article.get('description', 'No Description')
+        prompt += f"Title: {title}\nContent: {description}\n\n"
 
-    response = openai.Completion.create(
-        engine="text-davinci-003",
-        prompt=prompt,
-        max_tokens=200
-    )
-    return response.choices[0].text.strip()
+    # Use the summarizer pipeline
+    summary = summarizer(prompt, max_length=150, min_length=30, length_penalty=2.0, num_beams=4)[0]['summary_text']
+
+    end_time = time.time()
+    print(f"Summary generated in {end_time - start_time:.2f} seconds")
+    
+    return summary
+
+def refine_summary(summary):
+    nlp = spacy.load("en_core_web_sm")
+    doc = nlp(summary)
+    refined_summary = " ".join([sent.text for sent in doc.sents if "Apple" in sent.text])
+    return refined_summary
+
+def analyze_sentiment(summary):
+    sentiment = sentiment_analyzer(summary)
+    return sentiment
 
 # Function to visualize stock data
 def plot_stock_data(ticker):
@@ -61,9 +92,11 @@ def stock_summary_bot(ticker):
 
     # Get news and generate summary
     news = get_stock_news(ticker)
-    summary = generate_summary(news)
+    summary = refine_summary(generate_summary(news))
+    sentiment = analyze_sentiment(summary)
     print("News Summary:")
     print(summary)
+    print(f"Sentiment: {sentiment[0]['label']} ({sentiment[0]['score']:.2f})\n")
 
     # Plot stock data
     plot_stock_data(ticker)
